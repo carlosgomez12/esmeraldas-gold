@@ -7,8 +7,11 @@
 #   Sin dominio: pasa la IP del servidor (modo HTTP, p. ej. 123.45.67.89).
 #   REPO_URL=https://github.com/carlosgomez12/esmeraldas-gold.git \
 #     bash scripts/setup-vps.sh TU-DOMINIO.com
-#   N8N_DOMAIN=n8n.example.com bash scripts/setup-vps.sh 123.45.67.89
-#     → añade server block nginx para n8n (127.0.0.1:5678) y pide TLS si el DNS resuelve aquí.
+#   WEB_PORT=8080 bash scripts/setup-vps.sh 123.45.67.89
+#     → la tienda responde en http://123.45.67.89:8080 y NO toca 80/443
+#       (útil si otro servicio p. ej. n8n/Traefik ya ocupa 80/443).
+#   WEB_PORT_SSL=8443 → además escucha https en :8443 (cert snakeoil temporal;
+#       cuando haya dominio real usa el modo dominio + --with-ssl).
 #
 # Idempotente: si ya existe /var/www/esmeraldas-gold/.env NO se sobrescribe.
 set -euo pipefail
@@ -26,12 +29,18 @@ APP_USER="www-data"
 DB_USER="esmeraldas"
 DB_NAME="esmeraldas_gold"
 CERTBOT_EMAIL="${CERTBOT_EMAIL:-}"
+WEB_PORT="${WEB_PORT:-80}"
+WEB_PORT_SSL="${WEB_PORT_SSL:-}"
 
 # Modo IP: si el primer argumento es una IP, no hay HTTPS ni www.
 IS_IP=0
 echo "$DOMAIN" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$' && IS_IP=1
 if [[ "$IS_IP" -eq 1 ]]; then
-  SITE_URL="http://${DOMAIN}"
+  if [[ "$WEB_PORT" == "80" ]]; then
+    SITE_URL="http://${DOMAIN}"
+  else
+    SITE_URL="http://${DOMAIN}:${WEB_PORT}"
+  fi
   SERVER_NAME="${DOMAIN}"
 else
   SITE_URL="http://${DOMAIN}"
@@ -51,8 +60,8 @@ apt-get update -y
 apt-get install -y ca-certificates curl git build-essential nginx \
   postgresql postgresql-contrib
 
-echo "==> 1b/8 Liberar puertos 80/443 (servidor web previo de Hostinger)"
-for port in 80 443; do
+echo "==> 1b/8 Verificar puertos web libres (${WEB_PORT}${WEB_PORT_SSL:+ + ${WEB_PORT_SSL}})"
+for port in "$WEB_PORT" ${WEB_PORT_SSL:+"$WEB_PORT_SSL"}; do
   if ! ss -lnt "sport = :$port" | grep -q LISTEN; then
     continue
   fi
@@ -147,6 +156,7 @@ if [[ ! -f .env ]]; then
 else
   echo "  .env ya existe: NO se tocó. Asegúrate de que DATABASE_URL apunte a postgres."
 fi
+sed -i "s|^NEXT_PUBLIC_SITE_URL=.*|NEXT_PUBLIC_SITE_URL=\"${SITE_URL}\"|" .env || true
 
 echo "==> 5/8 Dependencias"
 npm ci
@@ -189,40 +199,46 @@ systemctl daemon-reload
 systemctl enable esmeraldas-gold
 systemctl restart esmeraldas-gold
 
-echo "  n8n: dominio opcional N8N_DOMAIN = ${N8N_DOMAIN:-<no definido; sin bloque nginx para n8n>}"
-N8N_DOMAIN_HOST="$(echo "${N8N_DOMAIN:-}" | sed -E 's|^https?://||; s|[/ ].*$||')"
-N8N_BLOCK=""
-if [[ -n "$N8N_DOMAIN_HOST" ]]; then
-  echo "  Añadiendo server block nginx: ${N8N_DOMAIN_HOST} -> 127.0.0.1:5678 (n8n)"
-  N8N_BLOCK=$(cat <<N8N_BLOCK_EOF
+if [[ "$WEB_PORT" != "80" ]]; then
+  echo "  Modo puertos aparte: nginx NO toca 80/443 (n8n/Traefik los conserva)."
+fi
+
+SSL_SERVER_BLOCK=""
+if [[ -n "$WEB_PORT_SSL" ]]; then
+  SSL_SERVER_BLOCK=$(cat <<SSL_BLOCK_EOF
 
 server {
-    listen 80;
-    server_name ${N8N_DOMAIN_HOST};
+    listen ${WEB_PORT_SSL} ssl;
+    server_name ${SERVER_NAME};
+
+    ssl_certificate /etc/ssl/certs/ssl-cert-snakeoil.pem;
+    ssl_certificate_key /etc/ssl/private/ssl-cert-snakeoil.key;
 
     client_max_body_size 20m;
 
+    location /_next/static/ {
+        alias ${APP_DIR}/.next/static/;
+        expires 1y;
+        add_header Cache-Control "public, immutable";
+    }
     location / {
-        proxy_pass http://127.0.0.1:5678;
+        proxy_pass http://127.0.0.1:3000;
         proxy_http_version 1.1;
         proxy_set_header Host \$host;
         proxy_set_header X-Real-IP \$remote_addr;
         proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Host \$host;
         proxy_set_header X-Forwarded-Proto \$scheme;
         proxy_set_header Upgrade \$http_upgrade;
         proxy_set_header Connection "upgrade";
-        proxy_read_timeout 300s;
-        proxy_send_timeout 300s;
     }
 }
-N8N_BLOCK_EOF
+SSL_BLOCK_EOF
 )
 fi
 
 cat > /etc/nginx/sites-available/esmeraldas-gold <<EOF
 server {
-    listen 80;
+    listen ${WEB_PORT};
     server_name ${SERVER_NAME};
 
     client_max_body_size 20m;
@@ -243,7 +259,7 @@ server {
         proxy_set_header Connection "upgrade";
     }
 }
-${N8N_BLOCK}
+${SSL_SERVER_BLOCK}
 EOF
 ln -sf /etc/nginx/sites-available/esmeraldas-gold /etc/nginx/sites-enabled/esmeraldas-gold
 rm -f /etc/nginx/sites-enabled/default
@@ -256,37 +272,21 @@ if [[ "$IS_IP" -eq 0 && "$WITH_SSL" == "--with-ssl" ]]; then
   systemctl reload nginx
 fi
 
-if [[ -n "$N8N_DOMAIN_HOST" ]]; then
-  RESOLVED_IP="$(getent ahostsv4 "$N8N_DOMAIN_HOST" | awk 'NR==1{print $1}')"
-  if [[ -n "$RESOLVED_IP" && "$RESOLVED_IP" == "$DOMAIN" ]]; then
-    echo "  Emitiendo certificado TLS para ${N8N_DOMAIN_HOST}..."
-    apt-get install -y certbot python3-certbot-nginx
-    certbot --nginx --non-interactive --agree-tos \
-      -m "${CERTBOT_EMAIL:-hola@${N8N_DOMAIN_HOST}}" -d "${N8N_DOMAIN_HOST}" --redirect \
-      || echo "  Aviso: certbot falló para ${N8N_DOMAIN_HOST} (revisa DNS/firewall)."
-    systemctl reload nginx || true
-  else
-    echo "  Aviso: ${N8N_DOMAIN_HOST} no resuelve a ${DOMAIN}; el cert TLS de n8n se pedirá luego."
-  fi
-fi
-
 echo ""
 echo "==================================================="
 echo "  Despliegue completado"
 if [[ "$IS_IP" -eq 1 ]]; then
-  echo "  - App (sin SSL por ahora):  http://${DOMAIN}/admin"
-else
-  if [[ "$WITH_SSL" == "--with-ssl" ]]; then
-    echo "  - App:         https://${DOMAIN}/admin"
-  else
-    echo "  - App:         http://${DOMAIN}/admin"
+  echo "  - App (admin):  http://${DOMAIN}:${WEB_PORT}/admin"
+  if [[ -n "$WEB_PORT_SSL" ]]; then
+    echo "  - App (https):  https://${DOMAIN}:${WEB_PORT_SSL}/  (cert temporal)"
   fi
+elif [[ "$WITH_SSL" == "--with-ssl" ]]; then
+  echo "  - App:         https://${DOMAIN}/admin"
+else
+  echo "  - App:         http://${DOMAIN}:${WEB_PORT}/admin"
 fi
 echo "Siguiente paso IMPORTANTE:"
 echo "==================================================="
-if [[ -n "$N8N_DOMAIN_HOST" ]]; then
-  echo "  n8n:    https://${N8N_DOMAIN_HOST}"
-fi
 echo "  1) Editar ${APP_DIR}/.env  (WhatsApp, WOMPI_*, GTM/GA4, admin real)."
 echo "  2) Volver a compilar con:  bash ${APP_DIR}/scripts/redeploy.sh"
 echo "  3) Configurar el webhook de Wompi:  /api/webhooks/wompi"
