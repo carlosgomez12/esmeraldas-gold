@@ -189,7 +189,7 @@ systemctl restart esmeraldas-gold
 
 echo "  Detectando n8n (127.0.0.1:5678) para exponerlo en /n8n..."
 N8N_PRESENT=0
-if curl -s --max-time 3 -o /dev/null -w '%{http_code}' http://127.0.0.1:5678/healthz | grep -q '200'; then
+if timeout 2 bash -c '</dev/tcp/127.0.0.1/5678' 2>/dev/null; then
   N8N_PRESENT=1
   echo "  n8n encontrado: nginx expondrá /n8n y los webhooks públicos."
 fi
