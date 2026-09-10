@@ -121,10 +121,7 @@ else
 fi
 cd "$APP_DIR"
 
-echo "==> 4/8 Dependencias"
-npm ci
-
-echo "==> 5/8 PostgreSQL (usuario/db + DATABASE_URL en .env)"
+echo "==> 4/8 PostgreSQL + .env (usuario/db + DATABASE_URL)"
 if [[ ! -f .env ]]; then
   DB_PASS="$(openssl rand -base64 24 | tr -dc 'a-zA-Z0-9' | head -c 24)"
   AUTH_SECRET="$(openssl rand -base64 32)"
@@ -148,6 +145,9 @@ if [[ ! -f .env ]]; then
 else
   echo "  .env ya existe: NO se tocó. Asegúrate de que DATABASE_URL apunte a postgres."
 fi
+
+echo "==> 5/8 Dependencias"
+npm ci
 
 echo "==> 6/8 Migraciones + seed"
 npx prisma migrate deploy
