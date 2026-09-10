@@ -128,6 +128,7 @@ if [[ ! -d "$APP_DIR/.git" ]]; then
   git clone "$REPO_URL" "$APP_DIR"
 else
   echo "Repo ya presente; actualizando..."
+  git config --global --add safe.directory "$APP_DIR" || true
   git -C "$APP_DIR" pull --ff-only || true
 fi
 cd "$APP_DIR"

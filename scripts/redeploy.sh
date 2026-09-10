@@ -14,7 +14,7 @@ SKIP_BUILD="${1:-}"
 command -v sudo >/dev/null 2>&1 && SUDO="sudo" || SUDO=""
 
 echo "==> 1/4 Pull + dependencias"
-$SUDO bash -c "cd $APP_DIR && git pull --ff-only && npm ci"
+$SUDO bash -c "git config --global --add safe.directory $APP_DIR 2>/dev/null || true; cd $APP_DIR && git pull --ff-only && npm ci"
 
 echo "==> 2/4 Migraciones (si las hay)"
 $SUDO bash -c "cd $APP_DIR && npx prisma migrate deploy"
