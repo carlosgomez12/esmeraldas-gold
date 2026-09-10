@@ -58,6 +58,10 @@ for port in 80 443; do
   ss -lntp "sport = :$port" || true
   pids="$(ss -lntpH "sport = :$port" | grep -oP 'pid=\K[0-9]+' | sort -u)"
   for pid in $pids; do
+    if ! ss -lnt "sport = :$port" | grep -q LISTEN; then
+      echo "    -> :$port ya quedó libre; sigo con el siguiente."
+      break
+    fi
     comm="$(ps -o comm= -p "$pid" 2>/dev/null | tr -d '[:space:]' || true)"
     echo "    -> proceso: '${comm}' (pid ${pid})"
     case "$comm" in
@@ -86,7 +90,7 @@ for port in 80 443; do
         fi
         ;;
       *)
-        echo "       ! Proceso desconocido ocupando :$port. Deténlo tú y vuelve a ejecutar este script. ($(ss -lntp \"sport = :$port\"))" >&2
+        echo "       ! Proceso desconocido ocupando :$port. Ejecuta 'ss -lntp' para identificarlo, deténlo y vuelve a ejecutar este script." >&2
         exit 1
         ;;
     esac
