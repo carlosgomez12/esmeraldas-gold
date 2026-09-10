@@ -1,0 +1,21 @@
+services:
+  db:
+    image: postgres:16-alpine
+    container_name: esmeraldas_gold_db
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: esmeraldas
+      POSTGRES_PASSWORD: esmeraldas_dev
+      POSTGRES_DB: esmeraldas_gold
+    ports:
+      - "5432:5432"
+    volumes:
+      - esmeraldas_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U esmeraldas -d esmeraldas_gold"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  esmeraldas_pgdata:
