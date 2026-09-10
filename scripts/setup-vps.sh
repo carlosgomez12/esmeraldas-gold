@@ -3,7 +3,8 @@
 # ESMERALDAS GOLD — Aprovisionamiento de VPS (Ubuntu 24.04 / Debian 12)
 # Uso (como root):
 #   bash scripts/setup-vps.sh TU-DOMINIO.com [--with-ssl]
-#     --with-ssl  instala certificado Let's Encrypt (exige tu dominio apuntando al servidor).
+#     --with-ssl  instala Let's Encrypt solo si pasas un dominio (no una IP).
+#   Sin dominio: pasa la IP del servidor (modo HTTP, p. ej. 123.45.67.89).
 #   REPO_URL=https://github.com/carlosgomez12/esmeraldas-gold.git \
 #     bash scripts/setup-vps.sh TU-DOMINIO.com
 #
@@ -23,6 +24,18 @@ APP_USER="www-data"
 DB_USER="esmeraldas"
 DB_NAME="esmeraldas_gold"
 CERTBOT_EMAIL="${CERTBOT_EMAIL:-hola@${DOMAIN}}"
+
+# Modo IP: si el primer argumento es una IP, no hay HTTPS ni www.
+IS_IP=0
+echo "$DOMAIN" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$' && IS_IP=1
+if [[ "$IS_IP" -eq 1 ]]; then
+  SITE_URL="http://${DOMAIN}"
+  SERVER_NAME="${DOMAIN}"
+else
+  SITE_URL="http://${DOMAIN}"
+  SERVER_NAME="${DOMAIN} www.${DOMAIN}"
+fi
+[[ "$WITH_SSL" == "--with-ssl" && "$IS_IP" -eq 0 ]] && SITE_URL="https://${DOMAIN}"
 
 if [[ "$(id -u)" -ne 0 ]]; then
   echo "Ejecuta como root (sudo)." >&2
@@ -73,7 +86,7 @@ if [[ ! -f .env ]]; then
   sed -i "s|postgresql://USER:PASSWORD@HOST:5432/esmeraldas_gold?schema=public|postgresql://${DB_USER}:${DB_PASS}@localhost:5432/${DB_NAME}?schema=public|" .env
   sed -i "s|^AUTH_SECRET=.*|AUTH_SECRET=\"${AUTH_SECRET}\"|" .env
   sed -i 's|^AUTH_TRUST_HOST=.*|AUTH_TRUST_HOST="true"|' .env
-  sed -i "s|^NEXT_PUBLIC_SITE_URL=.*|NEXT_PUBLIC_SITE_URL=\"https://${DOMAIN}\"|" .env
+  sed -i "s|^NEXT_PUBLIC_SITE_URL=.*|NEXT_PUBLIC_SITE_URL=\"${SITE_URL}\"|" .env
   sed -i 's|^NODE_ENV=.*|NODE_ENV="production"|' .env
   sed -i 's|^SEED_ADMIN_PASSWORD=.*|SEED_ADMIN_PASSWORD="CambiaEsta#Password2026"|' .env
   echo "  .env generado con credenciales nuevas."
@@ -122,7 +135,7 @@ systemctl restart esmeraldas-gold
 cat > /etc/nginx/sites-available/esmeraldas-gold <<EOF
 server {
     listen 80;
-    server_name ${DOMAIN} www.${DOMAIN};
+    server_name ${SERVER_NAME};
 
     client_max_body_size 20m;
 
@@ -147,7 +160,7 @@ ln -sf /etc/nginx/sites-available/esmeraldas-gold /etc/nginx/sites-enabled/esmer
 rm -f /etc/nginx/sites-enabled/default
 nginx -t && systemctl reload nginx
 
-if [[ "$WITH_SSL" == "--with-ssl" ]]; then
+if [[ "$IS_IP" -eq 0 && "$WITH_SSL" == "--with-ssl" ]]; then
   apt-get install -y certbot python3-certbot-nginx
   certbot --nginx --non-interactive --agree-tos -m "${CERTBOT_EMAIL}" \
     -d "${DOMAIN}" -d "www.${DOMAIN}" --redirect
@@ -157,8 +170,16 @@ fi
 echo ""
 echo "==================================================="
 echo "  Despliegue completado"
-echo "  - App:          http://${DOMAIN}  (o https con --with-ssl)"
-echo "  - Panel:        https://${DOMAIN}/admin"
+if [[ "$IS_IP" -eq 1 ]]; then
+  echo "  - App (sin SSL por ahora):  http://${DOMAIN}/admin"
+else
+  if [[ "$WITH_SSL" == "--with-ssl" ]]; then
+    echo "  - App:         https://${DOMAIN}/admin"
+  else
+    echo "  - App:         http://${DOMAIN}/admin"
+  fi
+fi
+echo "Siguiente paso IMPORTANTE:"
 echo "==================================================="
 echo "Siguiente paso IMPORTANTE:"
 echo "  1) Editar ${APP_DIR}/.env  (WhatsApp, WOMPI_*, GTM/GA4, admin real)."
