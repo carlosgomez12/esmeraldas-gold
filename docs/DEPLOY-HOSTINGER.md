@@ -3,6 +3,23 @@
 Guía para el servidor Node de la tienda en producción sobre un VPS Hostinger
 (Ubuntu/Debian).
 
+## Ruta rápida (scripts del repo)
+
+VPS fresco de Ubuntu 24.04/Debian 12, entrar como root y ejecutar:
+
+```bash
+bash scripts/setup-vps.sh TU-DOMINIO.com --with-ssl
+```
+
+El script instala Node 20/nginx/PostgreSQL, clona el repo, genera `.env` con
+secreto y base de datos nuevas, aplica migraciones + seed, compila y deja el
+servicio `esmeraldas-gold` + Nginx + Let's Encrypt funcionando. Tras eso:
+
+1. Edita `/var/www/esmeraldas-gold/.env` (WhatsApp, `WOMPI_*`, GTM/GA4, admin).
+2. `bash scripts/redeploy.sh` para reconstruir con los valores reales.
+
+Para actualizaciones posteriores: `bash scripts/redeploy.sh`.
+
 ## 1. Requisitos en el servidor
 
 ```bash
