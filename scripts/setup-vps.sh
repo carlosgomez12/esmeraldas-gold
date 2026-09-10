@@ -77,17 +77,13 @@ for port in 80 443; do
         echo "       nginx: lo controla este script, se recargará más adelante."
         ;;
       docker-proxy)
-        if command -v docker >/dev/null 2>&1; then
-          ctrs="$(docker ps -q --filter "publish=$port" 2>/dev/null || true)"
-          if [[ -n "$ctrs" ]]; then
-            docker update --restart=no $ctrs
-            docker stop $ctrs || true
-            echo "       Contenedor(es) con :$port detenidos (autostart desactivado)."
-          fi
-        else
-          echo "       ! docker-proxy sin docker visible; detenlo manualmente." >&2
-          exit 1
-        fi
+        echo "       ! El puerto :$port está publicado por un contenedor Docker (p. ej. Traefik/n8n)." >&2
+        echo "         NO los detengo automáticamente." >&2
+        echo "         Detén SOLO el proxy que publica 80/443 antes de continuar (p. ej.):" >&2
+        echo "           cd <directorio-con-docker-compose> && docker compose stop traefik" >&2
+        echo "         Contenedores con puertos publicados:" >&2
+        docker ps --format '   {{.Names}}\t{{.Ports}}\t{{.Image}}' || true
+        exit 1
         ;;
       *)
         echo "       ! Proceso desconocido ocupando :$port. Ejecuta 'ss -lntp' para identificarlo, deténlo y vuelve a ejecutar este script." >&2
@@ -191,6 +187,43 @@ systemctl daemon-reload
 systemctl enable esmeraldas-gold
 systemctl restart esmeraldas-gold
 
+echo "  Detectando n8n (127.0.0.1:5678) para exponerlo en /n8n..."
+N8N_PRESENT=0
+if curl -s --max-time 3 -o /dev/null -w '%{http_code}' http://127.0.0.1:5678/healthz | grep -q '200'; then
+  N8N_PRESENT=1
+  echo "  n8n encontrado: nginx expondrá /n8n y los webhooks públicos."
+fi
+N8N_EXTRA=""
+if [[ "$N8N_PRESENT" -eq 1 ]]; then
+N8N_EXTRA=$(cat <<'N8N_BLOCK'
+    location /n8n/ {
+        proxy_pass http://127.0.0.1:5678;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Host $host;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection "upgrade";
+        proxy_read_timeout 300s;
+        proxy_send_timeout 300s;
+    }
+    location ~ ^/(webhook|webhook-test|form)/ {
+        proxy_pass http://127.0.0.1:5678;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Host $host;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection "upgrade";
+    }
+N8N_BLOCK
+)
+fi
+
 cat > /etc/nginx/sites-available/esmeraldas-gold <<EOF
 server {
     listen 80;
@@ -203,6 +236,7 @@ server {
         expires 1y;
         add_header Cache-Control "public, immutable";
     }
+${N8N_EXTRA}
     location / {
         proxy_pass http://127.0.0.1:3000;
         proxy_http_version 1.1;
@@ -240,7 +274,9 @@ else
 fi
 echo "Siguiente paso IMPORTANTE:"
 echo "==================================================="
-echo "Siguiente paso IMPORTANTE:"
+if [[ "$N8N_PRESENT" -eq 1 ]]; then
+  echo "  n8n:   http://${DOMAIN}/n8n   (debe ejecutarse con N8N_PATH=/n8n)"
+fi
 echo "  1) Editar ${APP_DIR}/.env  (WhatsApp, WOMPI_*, GTM/GA4, admin real)."
 echo "  2) Volver a compilar con:  bash ${APP_DIR}/scripts/redeploy.sh"
 echo "  3) Configurar el webhook de Wompi:  /api/webhooks/wompi"
