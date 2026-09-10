@@ -247,7 +247,7 @@ ${N8N_BLOCK}
 EOF
 ln -sf /etc/nginx/sites-available/esmeraldas-gold /etc/nginx/sites-enabled/esmeraldas-gold
 rm -f /etc/nginx/sites-enabled/default
-nginx -t && systemctl reload nginx
+nginx -t && systemctl enable nginx && systemctl start nginx
 
 if [[ "$IS_IP" -eq 0 && "$WITH_SSL" == "--with-ssl" ]]; then
   apt-get install -y certbot python3-certbot-nginx
