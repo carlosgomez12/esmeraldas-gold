@@ -7,6 +7,8 @@
 #   Sin dominio: pasa la IP del servidor (modo HTTP, p. ej. 123.45.67.89).
 #   REPO_URL=https://github.com/carlosgomez12/esmeraldas-gold.git \
 #     bash scripts/setup-vps.sh TU-DOMINIO.com
+#   N8N_DOMAIN=n8n.example.com bash scripts/setup-vps.sh 123.45.67.89
+#     → añade server block nginx para n8n (127.0.0.1:5678) y pide TLS si el DNS resuelve aquí.
 #
 # Idempotente: si ya existe /var/www/esmeraldas-gold/.env NO se sobrescribe.
 set -euo pipefail
@@ -23,7 +25,7 @@ APP_DIR="${APP_DIR:-/var/www/esmeraldas-gold}"
 APP_USER="www-data"
 DB_USER="esmeraldas"
 DB_NAME="esmeraldas_gold"
-CERTBOT_EMAIL="${CERTBOT_EMAIL:-hola@${DOMAIN}}"
+CERTBOT_EMAIL="${CERTBOT_EMAIL:-}"
 
 # Modo IP: si el primer argumento es una IP, no hay HTTPS ni www.
 IS_IP=0
@@ -187,40 +189,34 @@ systemctl daemon-reload
 systemctl enable esmeraldas-gold
 systemctl restart esmeraldas-gold
 
-echo "  Detectando n8n (127.0.0.1:5678) para exponerlo en /n8n..."
-N8N_PRESENT=0
-if timeout 2 bash -c '</dev/tcp/127.0.0.1/5678' 2>/dev/null; then
-  N8N_PRESENT=1
-  echo "  n8n encontrado: nginx expondrá /n8n y los webhooks públicos."
-fi
-N8N_EXTRA=""
-if [[ "$N8N_PRESENT" -eq 1 ]]; then
-N8N_EXTRA=$(cat <<'N8N_BLOCK'
-    location /n8n/ {
+echo "  n8n: dominio opcional N8N_DOMAIN = ${N8N_DOMAIN:-<no definido; sin bloque nginx para n8n>}"
+N8N_DOMAIN_HOST="$(echo "${N8N_DOMAIN:-}" | sed -E 's|^https?://||; s|[/ ].*$||')"
+N8N_BLOCK=""
+if [[ -n "$N8N_DOMAIN_HOST" ]]; then
+  echo "  Añadiendo server block nginx: ${N8N_DOMAIN_HOST} -> 127.0.0.1:5678 (n8n)"
+  N8N_BLOCK=$(cat <<N8N_BLOCK_EOF
+
+server {
+    listen 80;
+    server_name ${N8N_DOMAIN_HOST};
+
+    client_max_body_size 20m;
+
+    location / {
         proxy_pass http://127.0.0.1:5678;
         proxy_http_version 1.1;
-        proxy_set_header Host $host;
-        proxy_set_header X-Real-IP $remote_addr;
-        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Host $host;
-        proxy_set_header X-Forwarded-Proto $scheme;
-        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Host \$host;
+        proxy_set_header X-Real-IP \$remote_addr;
+        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Host \$host;
+        proxy_set_header X-Forwarded-Proto \$scheme;
+        proxy_set_header Upgrade \$http_upgrade;
         proxy_set_header Connection "upgrade";
         proxy_read_timeout 300s;
         proxy_send_timeout 300s;
     }
-    location ~ ^/(webhook|webhook-test|form)/ {
-        proxy_pass http://127.0.0.1:5678;
-        proxy_http_version 1.1;
-        proxy_set_header Host $host;
-        proxy_set_header X-Real-IP $remote_addr;
-        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Host $host;
-        proxy_set_header X-Forwarded-Proto $scheme;
-        proxy_set_header Upgrade $http_upgrade;
-        proxy_set_header Connection "upgrade";
-    }
-N8N_BLOCK
+}
+N8N_BLOCK_EOF
 )
 fi
 
@@ -236,7 +232,6 @@ server {
         expires 1y;
         add_header Cache-Control "public, immutable";
     }
-${N8N_EXTRA}
     location / {
         proxy_pass http://127.0.0.1:3000;
         proxy_http_version 1.1;
@@ -248,6 +243,7 @@ ${N8N_EXTRA}
         proxy_set_header Connection "upgrade";
     }
 }
+${N8N_BLOCK}
 EOF
 ln -sf /etc/nginx/sites-available/esmeraldas-gold /etc/nginx/sites-enabled/esmeraldas-gold
 rm -f /etc/nginx/sites-enabled/default
@@ -255,9 +251,23 @@ nginx -t && systemctl reload nginx
 
 if [[ "$IS_IP" -eq 0 && "$WITH_SSL" == "--with-ssl" ]]; then
   apt-get install -y certbot python3-certbot-nginx
-  certbot --nginx --non-interactive --agree-tos -m "${CERTBOT_EMAIL}" \
+  certbot --nginx --non-interactive --agree-tos -m "${CERTBOT_EMAIL:-hola@${DOMAIN}}" \
     -d "${DOMAIN}" -d "www.${DOMAIN}" --redirect
   systemctl reload nginx
+fi
+
+if [[ -n "$N8N_DOMAIN_HOST" ]]; then
+  RESOLVED_IP="$(getent ahostsv4 "$N8N_DOMAIN_HOST" | awk 'NR==1{print $1}')"
+  if [[ -n "$RESOLVED_IP" && "$RESOLVED_IP" == "$DOMAIN" ]]; then
+    echo "  Emitiendo certificado TLS para ${N8N_DOMAIN_HOST}..."
+    apt-get install -y certbot python3-certbot-nginx
+    certbot --nginx --non-interactive --agree-tos \
+      -m "${CERTBOT_EMAIL:-hola@${N8N_DOMAIN_HOST}}" -d "${N8N_DOMAIN_HOST}" --redirect \
+      || echo "  Aviso: certbot falló para ${N8N_DOMAIN_HOST} (revisa DNS/firewall)."
+    systemctl reload nginx || true
+  else
+    echo "  Aviso: ${N8N_DOMAIN_HOST} no resuelve a ${DOMAIN}; el cert TLS de n8n se pedirá luego."
+  fi
 fi
 
 echo ""
@@ -274,8 +284,8 @@ else
 fi
 echo "Siguiente paso IMPORTANTE:"
 echo "==================================================="
-if [[ "$N8N_PRESENT" -eq 1 ]]; then
-  echo "  n8n:   http://${DOMAIN}/n8n   (debe ejecutarse con N8N_PATH=/n8n)"
+if [[ -n "$N8N_DOMAIN_HOST" ]]; then
+  echo "  n8n:    https://${N8N_DOMAIN_HOST}"
 fi
 echo "  1) Editar ${APP_DIR}/.env  (WhatsApp, WOMPI_*, GTM/GA4, admin real)."
 echo "  2) Volver a compilar con:  bash ${APP_DIR}/scripts/redeploy.sh"
