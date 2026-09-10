@@ -49,12 +49,67 @@ apt-get update -y
 apt-get install -y ca-certificates curl git build-essential nginx \
   postgresql postgresql-contrib
 
+echo "==> 1b/8 Liberar puertos 80/443 (servidor web previo de Hostinger)"
+for port in 80 443; do
+  if ! ss -lnt "sport = :$port" | grep -q LISTEN; then
+    continue
+  fi
+  echo "  :$port en uso por:"
+  ss -lntp "sport = :$port" || true
+  pids="$(ss -lntpH "sport = :$port" | grep -oP 'pid=\K[0-9]+' | sort -u)"
+  for pid in $pids; do
+    comm="$(ps -o comm= -p "$pid" 2>/dev/null | tr -d '[:space:]' || true)"
+    echo "    -> proceso: '${comm}' (pid ${pid})"
+    case "$comm" in
+      caddy)
+        systemctl disable --now caddy || true
+        echo "       caddy detenido y deshabilitado."
+        ;;
+      apache2)
+        systemctl disable --now apache2 || true
+        echo "       apache2 detenido y deshabilitado."
+        ;;
+      nginx)
+        echo "       nginx: lo controla este script, se recargará más adelante."
+        ;;
+      docker-proxy)
+        if command -v docker >/dev/null 2>&1; then
+          ctrs="$(docker ps -q --filter "publish=$port" 2>/dev/null || true)"
+          if [[ -n "$ctrs" ]]; then
+            docker update --restart=no $ctrs
+            docker stop $ctrs || true
+            echo "       Contenedor(es) con :$port detenidos (autostart desactivado)."
+          fi
+        else
+          echo "       ! docker-proxy sin docker visible; detenlo manualmente." >&2
+          exit 1
+        fi
+        ;;
+      *)
+        echo "       ! Proceso desconocido ocupando :$port. Deténlo tú y vuelve a ejecutar este script. ($(ss -lntp \"sport = :$port\"))" >&2
+        exit 1
+        ;;
+    esac
+  done
+done
+
 echo "==> 2/8 Node.js 20 LTS (NodeSource)"
-if ! command -v node >/dev/null 2>&1; then
+NODE_OK=0
+if command -v node >/dev/null 2>&1; then
+  NODE_MAJOR="$(node -p 'Number(process.versions.node.split(".")[0])' 2>/dev/null || echo 0)"
+  [[ "$NODE_MAJOR" -ge 20 ]] && NODE_OK=1
+fi
+if [[ "$NODE_OK" -eq 0 ]]; then
+  echo "  Node ausente o <20 (actual: $(command -v node >/dev/null 2>&1 && node -v || echo 'ninguno')). Instalando NodeSource 20..."
   curl -fsSL https://deb.nodesource.com/setup_20.x | bash -
   apt-get install -y nodejs
 fi
 node -v
+NODE_MAJOR="$(node -p 'Number(process.versions.node.split(".")[0])' 2>/dev/null || echo 0)"
+if [[ "$NODE_MAJOR" -lt 20 ]]; then
+  echo "ERROR: se necesita Node >=20 para Prisma/Next. Detén este script e instálalo a mano." >&2
+  exit 1
+fi
 
 echo "==> 3/8 Código (git clone)"
 mkdir -p "$APP_DIR"
